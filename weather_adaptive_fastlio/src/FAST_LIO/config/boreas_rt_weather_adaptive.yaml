@@ -1,0 +1,94 @@
+/**:
+    ros__parameters:
+        dataset: {name: "BOREAS-RT"}
+        common:
+            lid_topic: "/velodyne_points"
+            imu_topic: "/imu/data"
+            lid_frame_id: "lidar"
+            imu_frame_id: "imu"
+            time_sync_en: false
+            time_offset_lidar_to_imu: 0.0
+            lidar_qos_depth: 50
+            imu_qos_depth: 5000
+            executor_threads: 4
+        preprocess:
+            lidar_type: 2
+            scan_line: 128
+            blind: 2.0
+            timestamp_unit: 0
+            scan_rate: 10
+        mapping:
+            acc_cov: 0.1
+            gyr_cov: 0.1
+            b_acc_cov: 0.0001
+            b_gyr_cov: 0.0001
+            init_gyro_bias_from_mean: false
+            fov_degree: 360.0
+            det_range: 200.0
+            extrinsic_est_en: false
+            extrinsic_T: [0.0, 0.0, 0.13]
+            extrinsic_R: [0.736055565, -0.676921122, 0.0,
+                          0.676921122,  0.736055565, 0.0,
+                          0.0, 0.0, 1.0]
+        publish:
+            path_en: true
+            scan_publish_en: true
+            dense_publish_en: false
+            scan_bodyframe_pub_en: false
+            map_publish_en: true
+            map_publish_period_sec: 3.0
+            map_visual_voxel_size: 0.75
+            map_visual_max_points: 250000
+        rank_weight:
+            enable: true
+            gpu_enable: true
+            ring_source: "pointcloud2_ring"
+            ring_valid_warning_ratio: 0.90
+            horizontal_resolution_deg: 0.2
+            sigma_r: 1.0
+            range_factor_mode: "inverse"
+            min_weight: 0.8
+            max_weight: 1.1
+            huber_enable: true
+            huber_delta: 0.2
+            map_filter_enable: true
+            map_filter_percent: 5.0
+            fov_up_deg: 15.0
+            fov_down_deg: -25.0
+            frame_confidence_enable: true
+            frame_alpha_rank: 0.3
+            frame_alpha_count: 0.2
+            frame_alpha_residual: 0.5
+            frame_gamma: 1.0
+            frame_ref_points: 1000.0
+            frame_residual_sigma: 0.15
+            frame_ref_mean: 1.0
+            log_every_n_frames: 20
+        adaptive_lidar_cov:
+            enable: true
+            mode: "degradation"
+            base_cov: 0.001
+            min_confidence: 0.10
+            degradation_gamma: 2.0
+            min_cov: 0.001
+            max_cov: 0.10
+        weather_adaptive:
+            enable: true
+            huber_delta_min: 0.05
+            rank_min_weight_max: 1.0
+            rank_max_weight_min: 1.0
+            map_filter_percent_min: 0.0
+        map_confidence_fail_safe:
+            enable: true
+            min_effective_points: 100
+            skip_below_effective_points: 20
+            min_rank_valid_ratio: 0.20
+            threshold_relax_factor: 0.50
+        experiment_log:
+            enable: true
+            path: "/home/yoon/FAST_LIO_ROS2/ros2_ws_from_container/src/FAST_LIO/Log/proposed_metrics.csv"
+        traj_save:
+            traj_save_en: true
+            traj_file_path: "/home/yoon/FAST_LIO_ROS2/ros2_ws_from_container/src/FAST_LIO/traj/proposed_tum.txt"
+        pcd_save: {pcd_save_en: false, interval: -1}
+        map_file_path: "/home/yoon/FAST_LIO_ROS2/ros2_ws_from_container/src/FAST_LIO/PCD/proposed_map.pcd"

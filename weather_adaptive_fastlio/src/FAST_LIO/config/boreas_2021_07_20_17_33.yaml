@@ -1,0 +1,104 @@
+/**:
+    ros__parameters:
+        dataset:
+            name: "boreas-2021-07-20-17-33"
+            sequence: "boreas-2021-07-20-17-33"
+            ground_truth_path: "/home/yoon/FAST_LIO_ROS2/ros2_ws_from_container/datasets/boreas-2021-07-20-17-33/applanix/lidar_poses_tum.txt"
+
+        common:
+            # Raw Boreas ROS bags converted from this sequence commonly expose
+            # Velodyne packets as /velodyne_points and the vehicle IMU as
+            # /handsfree/imu. If your bag was pre-remapped, override this from
+            # launch with imu_topic:=/imu/data.
+            lid_topic: "/velodyne_points"
+            imu_topic: "/handsfree/imu"
+            lid_frame_id: "lidar"
+            imu_frame_id: "imu"
+            map_frame_id: "boreas_map"
+            body_frame_id: "imu"
+            time_sync_en: false
+            time_offset_lidar_to_imu: 0.0
+            lidar_qos_depth: 50
+            imu_qos_depth: 5000
+            lidar_qos_reliable: false
+            imu_qos_reliable: false
+            executor_threads: 4
+
+        preprocess:
+            lidar_type: 2
+            scan_line: 128
+            blind: 2.0
+            timestamp_unit: 0
+            scan_rate: 10
+
+        mapping:
+            acc_cov: 0.1
+            gyr_cov: 0.1
+            b_acc_cov: 0.0001
+            b_gyr_cov: 0.0001
+            init_gyro_bias_from_mean: false
+            fov_degree: 360.0
+            det_range: 200.0
+            extrinsic_est_en: false
+
+            # FAST-LIO expects LiDAR pose wrt IMU/body: p_I = R_L_I * p_L + T_L_I.
+            # These values match the Boreas/Boreas-RT Velodyne-to-vehicle yaw
+            # convention used by the existing Boreas configs in this workspace.
+            # If you load the official calibration and it is given as IMU->LiDAR,
+            # use its inverse here.
+            extrinsic_T: [0.0, 0.0, 0.13]
+            extrinsic_R: [0.736055565, -0.676921122, 0.0,
+                          0.676921122,  0.736055565, 0.0,
+                          0.0,          0.0,         1.0]
+
+        publish:
+            path_en: true
+            scan_publish_en: true
+            dense_publish_en: false
+            scan_bodyframe_pub_en: false
+            map_publish_en: true
+            map_publish_period_sec: 3.0
+            map_visual_voxel_size: 0.75
+            map_visual_max_points: 250000
+
+        rank_weight:
+            enable: false
+            gpu_enable: false
+            ring_source: "pointcloud2_ring"
+            ring_valid_warning_ratio: 0.90
+            horizontal_resolution_deg: 0.2
+            sigma_r: 1.0
+            range_factor_mode: "none"
+            min_weight: 1.0
+            max_weight: 1.0
+            huber_enable: false
+            map_filter_enable: false
+            frame_confidence_enable: false
+            fov_up_deg: 15.0
+            fov_down_deg: -25.0
+
+        adaptive_lidar_cov:
+            enable: false
+            mode: "degradation"
+            base_cov: 0.001
+            min_confidence: 0.10
+            degradation_gamma: 2.0
+            min_cov: 0.001
+            max_cov: 0.10
+
+        map_confidence_fail_safe:
+            enable: false
+
+        experiment_log:
+            enable: true
+            path: "/home/yoon/FAST_LIO_ROS2/ros2_ws_from_container/src/FAST_LIO/Log/boreas_2021_07_20_17_33_metrics.csv"
+
+        traj_save:
+            traj_save_en: true
+            traj_file_path: "/home/yoon/FAST_LIO_ROS2/ros2_ws_from_container/src/FAST_LIO/traj/boreas_2021_07_20_17_33_fastlio.tum"
+
+        pcd_save:
+            pcd_save_en: false
+            interval: -1
+
+        map_file_path: "/home/yoon/FAST_LIO_ROS2/ros2_ws_from_container/src/FAST_LIO/PCD/boreas_2021_07_20_17_33_map.pcd"
