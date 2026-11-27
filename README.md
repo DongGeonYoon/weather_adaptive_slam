@@ -18,9 +18,7 @@
 
 ---
 
-## 1. 방법
-
-### 1.1 처리 흐름
+## 1. 방법: 처리 흐름
 
 ```
 LiDAR + IMU
@@ -38,30 +36,6 @@ LiDAR + IMU
         출력 지도: 적응형 임계값 τ_k = percentile(consistency, p_k), p_k는 날씨 클러터 비율에 따라 5~60%
 ```
 
-### 1.2 이 프로젝트에서 바꾼 점 (`weather_reliability.*`)
-
-| 항목 | 기존 adaptive | 제안 방법 | 이유 (실험 근거) |
-|---|---|---|---|
-| 스캔 신뢰도 c_k | rank 평균, 점 수, 잔차를 고정 기준으로 정규화 | 맑은 날 기준값 R_ref·N_ref로 정규화하고 running max로 보정. 구조 점 수 q_N은 consistency ≥ 0.3인 점만 셈 | 기존 식의 c_k는 날씨 변화에 대한 반응이 약했음 |
-| c_k 갱신 시점 | IEKF 반복마다 다시 계산 | **스캔당 한 번 계산 후 고정**(`freeze_confidence`) | 반복 중에 측정 모델이 바뀌어 복합 악천후에서 발산 (ATE 2.59 m) |
-| 스캔 가중치 (frame weight) | 점 가중치에 곱함 | 끔. D_k는 공분산 경로로만 반영 | 위와 같은 발산의 원인 |
-| 지도 필터 점수 | R_k,i (거리 보정 포함) | **consistency 항만** 사용(`map_on_consistency`) | 거리 보정이 들어가면 가까운 지면 점이 먼저 지워져 z 방향 드리프트 발생 |
-| 지도 필터 강도 | 고정 5% | 스캔의 클러터 비율에 따라 **적응형 5~60%** | 날씨가 심할수록 더 많이 걸러야 함 |
-| 정합 지도 / 출력 지도 | 하나 | **분리**(`separate_output_map`) | 정합 지도를 강하게 거르면 정합할 점이 부족해져 ATE 악화 |
-| 적응 공분산 R0(1+γD_k) | 켬 | **끔** (ablation으로는 유지) | 안개에서는 좋았지만 눈(A)에서 3회 모두 실패 (ATE 1.12 m) |
-
-모든 새 파라미터의 기본값은 꺼짐입니다. 기존 설정 파일로 실행하면 원래 동작이 그대로 재현됩니다(복합 악천후 ATE 2.590 m 동일).
-
-### 1.3 제안서 대비 구현 범위
-
-| 제안서 | 이 저장소 | 비고 |
-|---|---|---|
-| R_k,i, 가중치, Huber, c_k, D_k, R_lidar, τ_k | 구현함 | 거리 보정항은 실험에서 더 좋았던 `inverse`(1/(1+r/r_max))를 사용 |
-| Cartographer 3D 백엔드, loop closure | 구현 안 함 | FAST-LIO2 오도메트리만 사용 |
-| 휠 오도메트리 motion prior | 구현 안 함 | IMU prior만 사용 |
-| CARLA 악천후 평가 | 구현 안 함 | 자체 합성 시뮬레이터로 대체 |
-| ATE, RPE, voxel IoU | 구현함 | 맵 노이즈 비율과 종단 드리프트를 추가 |
-
 ---
 
 ## 2. 저장소 구조
@@ -74,7 +48,7 @@ weather_adaptive_fastlio/
 │   ├── config/sim_weather_baseline.yaml                     baseline
 │   ├── config/sim_weather_weather_adaptive_original.yaml    기존 adaptive
 │   ├── config/sim_weather_weather_adaptive.yaml             제안 방법 (최종)
-│   ├── config/boreas_rt_*.yaml         실제 데이터(Boreas)용 설정 (이번 변경은 아직 미적용)
+│   ├── config/boreas_rt_*.yaml         실제 데이터(Boreas)용 설정 (제안 방법 설정은 아직 미적용)
 │   └── doc/WEATHER_ADAPTIVE_FAST_LIO2.md
 ├── sim/                                악천후 시뮬레이션 벤치마크 (사용법: sim/README.md)
 │   ├── sim_world.py, weather_models.py 장면, 궤적, LiDAR/IMU, 날씨 모델
@@ -137,8 +111,8 @@ docs/figures/                           README 그림
    - c_k 신호 개선(V1)과 스캔 가중치 고정(V5)은 기존 대비 ATE를 0.76~0.79배로 줄였습니다.
    - 지도를 강하게 거르는 안(V4)은 노이즈를 0.13배로 줄였지만 ATE가 2.2배로 나빠졌습니다.
    - 즉 **"지도를 깨끗하게 하는 것"과 "정합을 안정적으로 하는 것"이 서로 충돌**했습니다.
-3. **제안서와 코드 비교, 1차 구현**
-   - 제안서의 c_k, D_k, τ_k 식을 구현했습니다.
+3. **신뢰도 식 구현 (1차)**
+   - c_k, D_k, τ_k 식을 구현했습니다.
    - 분석한 결과, 점 신뢰도 R_k,i는 날씨 점을 잘 구분했습니다(AUC 0.98~0.99).
    - 하지만 R_k,i에는 거리 보정이 들어 있어서, 이 값의 percentile로 거르면 가까운 지면 점부터 사라졌습니다. 그래서 지도 필터에는 거리 보정을 뺀 consistency 항만 쓰기로 했습니다.
    - 1차 구현은 노이즈는 줄였지만 ATE가 기존과 비슷하거나 나빴습니다(기존 대비 1.73배).
@@ -225,7 +199,7 @@ docs/figures/                           README 그림
 | **안개에 약함.** 데이터셋 4개 모두에서 baseline보다 나빴고, C에서는 0.21 → 0.49 m로 크게 나빠짐 | 센서 근처 후방산란 클러터가 점 가중치에 미치는 영향 분석 |
 | **적응 공분산 R0(1+γD_k)이 불안정.** 안개에서는 좋았지만(0.26 → 0.15 m) 눈에서 발산(1.12 m)해서 꺼 둠 | 공분산 증가 상한, 누적 기준값 대비 D_k 사용, 시간 평활화 |
 | **시뮬레이션만으로 검증.** 단순화된 장면과 날씨 모델, 장면 4개, 같은 형태의 경로 | Boreas 악천후 시퀀스로 검증. R_ref·N_ref는 센서별로 다시 보정 |
-| **제안서 구성 일부 미구현.** Cartographer 백엔드, loop closure, 휠 오도메트리 prior | 휠 오도메트리 prior와 loop closure 추가 |
+| **오도메트리만 사용.** loop closure와 휠 오도메트리 prior가 없음 | 휠 오도메트리 prior와 loop closure 추가 |
 
 ## 6. 재현 방법
 
