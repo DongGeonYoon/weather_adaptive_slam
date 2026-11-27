@@ -20,48 +20,56 @@
 
 ## 1. 방법: 처리 흐름
 
-```
-LiDAR + IMU
-  └─ IMU 전파 (FAST-LIO2)
-  └─ Fast Point Ranking: 점 신뢰도 R_k,i  (5×5 range-image 창)
-  │     R_k,i = (1 + consistency_i) · range_factor(r_i)
-  │     consistency_i = Σ exp(-Δr²/2σ²) / |N|        ← 주변 점과 거리가 일관된 정도 (0~1)
-  └─ rank-aware 다운샘플링
-  └─ IEKF 정합 (point-to-plane)
-  │     점 가중치 w_i = rank 가중치 × Huber
-  │     스캔 신뢰도 c_k = α_R·R̃_k + α_N·q_N,k + α_E·q_E,k   → 열화도 D_k = 1 - c_k
-  │     (선택) LiDAR 공분산 R_k = R0·(1 + γ·D_k)
-  └─ 지도 갱신
-        정합용 지도(ikd-tree): 가벼운 필터 (rank 하위 5% 제외)
-        출력 지도: 적응형 임계값 τ_k = percentile(consistency, p_k), p_k는 날씨 클러터 비율에 따라 5~60%
-```
+![Weather-Adaptive FAST-LIO2 처리 흐름](docs/figures/pipeline.png)
 
 ---
 
 ## 2. 저장소 구조
 
 ```
-weather_adaptive_fastlio/
-├── src/FAST_LIO/                       FAST-LIO2 (ROS 2 Humble) + weather-adaptive 확장
-│   ├── src/laserMapping.cpp            rank 가중치, c_k/D_k, weather_reliability, 지도 분리
-│   ├── src/rank_cuda.cu                Fast Point Ranking CUDA 커널
-│   ├── config/sim_weather_baseline.yaml                     baseline
-│   ├── config/sim_weather_weather_adaptive_original.yaml    기존 adaptive
-│   ├── config/sim_weather_weather_adaptive.yaml             제안 방법 (최종)
-│   ├── config/boreas_rt_*.yaml         실제 데이터(Boreas)용 설정 (제안 방법 설정은 아직 미적용)
-│   └── doc/WEATHER_ADAPTIVE_FAST_LIO2.md
-├── sim/                                악천후 시뮬레이션 벤치마크 (사용법: sim/README.md)
-│   ├── sim_world.py, weather_models.py 장면, 궤적, LiDAR/IMU, 날씨 모델
-│   ├── generate_dataset.py             날씨별 rosbag2와 GT 생성
-│   ├── run_experiments.sh              방법별 실행
-│   ├── evaluate_sim.py                 ATE, RPE, 드리프트, 맵 노이즈, voxel IoU
-│   ├── compare_results.py              데이터셋·반복을 합친 비교표
-│   ├── render_presentation.py          발표용 비교 영상 (1920×1080, 한글)
-│   └── make_highlight.sh               약 1분 40초 하이라이트판
-├── scripts/, validation/, results/     로컬 빌드와 Boreas 실행 도구
-└── sim_results/                        실험 산출물 (git 제외)
-docs/figures/                           README 그림
+.
+├── README.md
+├── docs/figures/                           README 그림 (처리 흐름, 비교 영상 프레임, 결과 요약)
+└── weather_adaptive_fastlio/               ROS 2 Humble 작업공간
+    ├── LOCAL_SETUP.md                      Docker 없이 로컬에서 설치·빌드하는 방법
+    ├── scripts/
+    │   ├── setup_local_humble.sh           의존성 설치 (ROS 2, PCL, Eigen, Livox-SDK2 등)
+    │   └── build_local_humble.sh           colcon 빌드
+    ├── config/boreas_rosbag_qos.yaml       Boreas rosbag 재생 QoS 설정
+    ├── validation/run_boreas_short.sh      Boreas 짧은 구간 실행
+    ├── results/odom_bag_to_tum.py          /Odometry bag → TUM 궤적 변환
+    ├── src/FAST_LIO/                       FAST-LIO2 + weather-adaptive 확장 (ROS 2 패키지)
+    │   ├── src/
+    │   │   ├── laserMapping.cpp            메인 노드: IEKF, 점 신뢰도 가중치, c_k / D_k,
+    │   │   │                               적응 공분산, 지도 필터 τ_k, weather_reliability 확장
+    │   │   ├── rank_cuda.cu                Fast Point Ranking CUDA 커널
+    │   │   ├── preprocess.cpp / .h         LiDAR 전처리 (ring, time 필드 처리)
+    │   │   └── IMU_Processing.hpp          IMU 전파, 모션 보정
+    │   ├── include/                        ikd-Tree, IKFoM(IEKF), rank_cuda.h 등 헤더
+    │   ├── config/
+    │   │   ├── sim_weather_baseline.yaml                   시뮬레이션 · baseline
+    │   │   ├── sim_weather_weather_adaptive_original.yaml  시뮬레이션 · 기존 adaptive
+    │   │   ├── sim_weather_weather_adaptive.yaml           시뮬레이션 · 제안 방법 (최종)
+    │   │   ├── boreas_rt_baseline.yaml                     Boreas · baseline
+    │   │   ├── boreas_rt_weather_adaptive.yaml             Boreas · adaptive (제안 방법 설정 미적용)
+    │   │   └── boreas*.yaml, velodyne*.yaml                원본 FAST-LIO 센서 설정
+    │   ├── launch/mapping_boreas.launch.py, mapping_velodyne.launch.py
+    │   ├── rviz_cfg/                       RViz 설정
+    │   ├── msg/Pose6D.msg
+    │   ├── tools/evaluate_weather_adaptive.py   Boreas 결과 평가 (ATE, RTE, 맵 노이즈)
+    │   └── doc/WEATHER_ADAPTIVE_FAST_LIO2.md    파라미터 설명
+    └── sim/                                악천후 시뮬레이션 벤치마크 (사용법: sim/README.md)
+        ├── sim_world.py                    장면, 궤적, LiDAR(32채널)·IMU 생성
+        ├── weather_models.py               안개, 비, 눈, 복합 날씨 모델
+        ├── generate_dataset.py             날씨별 rosbag2와 GT 생성
+        ├── run_experiments.sh              방법별 실행 (baseline / original / proposed / proposed_cov)
+        ├── evaluate_sim.py                 ATE, RPE, 드리프트, 맵 노이즈, voxel IoU
+        ├── compare_results.py              데이터셋·반복 합산 비교표
+        ├── render_presentation.py          발표용 3D 지도 비교 영상
+        └── make_highlight.sh               약 1분 40초 하이라이트판
 ```
+
+실험 산출물(데이터셋 bag, 실행 기록, 영상)은 `weather_adaptive_fastlio/sim_results/`에 생성되며 저장소에는 포함되지 않습니다.
 
 ---
 
@@ -175,7 +183,7 @@ docs/figures/                           README 그림
 ![검증 결과 요약](docs/figures/validation_summary.jpg)
 
 ![비 조건 비교](docs/figures/frame_valC_rain.jpg)
-*검증 데이터셋 C, 비. 궤적 오차는 세 방법이 거의 같지만, 지도에 들어간 날씨 노이즈는 15.1%에서 1.1%로 줄었습니다.*
+*검증 데이터셋 C, 비. 궤적 오차는 두 방법이 거의 같지만, 지도에 들어간 날씨 노이즈는 15.1%에서 1.1%로 줄었습니다.*
 
 ---
 
