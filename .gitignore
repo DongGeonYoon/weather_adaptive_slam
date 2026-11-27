@@ -11,3 +11,6 @@ __pycache__/
 
 .vscode/
 .idea/
+
+# simulation outputs (bags, runs, videos)
+weather_adaptive_fastlio/sim_results/
