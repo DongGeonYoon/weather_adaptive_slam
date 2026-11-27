@@ -161,6 +161,38 @@ int map_min_effective_points = 100;
 int map_skip_below_effective_points = 20;
 double map_min_rank_valid_ratio = 0.2;
 double map_threshold_relax_factor = 0.5;
+
+// Weather reliability (proposal Sec. 3-3, 3-4):
+//   c_k = a_R * R~_k + a_N * q_N,k + a_E * q_E,k
+//   R~_k  = (mean R_k,i - 1) / (R_ref - 1)          normalised mean reliability
+//   q_N,k = N_k(structural) / N_ref                  structural support (consistency >= thr)
+//   q_E,k = exp(-sigma_E,k^2 / sigma_E,0^2)          residual stability
+// R_ref / N_ref are clear-weather references; a slowly decaying running maximum
+// takes over when the observed values exceed them.  c_k is evaluated once per
+// scan (first IEKF iteration) so R_k^lidar is fixed within one update.
+// tau_k uses a per-frame percentile p_k that grows with the share of
+// low-consistency points among the downsampled points.
+bool   wr_enable = false, wr_freeze_confidence = true, wr_adaptive_map_percent = true;
+double wr_consistency_threshold = 0.3;
+double wr_ref_mean_rank = 2.0, wr_ref_struct_points = 20000.0, wr_ref_residual_sigma = 0.1;
+double wr_ref_decay = 0.002;
+double wr_alpha_rank = 0.4, wr_alpha_count = 0.4, wr_alpha_residual = 0.2;
+double wr_map_percent_min = 5.0, wr_map_percent_max = 60.0, wr_map_percent_gain = 1.0;
+double wr_mean_rank_last = 0.0, wr_struct_points_last = 0.0;
+double wr_clutter_ratio_last = 0.0, wr_clutter_down_last = 0.0;
+double wr_ref_rank_run = 0.0, wr_ref_struct_run = 0.0;
+double map_filter_percent_frame = 20.0;
+bool   wr_map_on_consistency = true;      // tau_k on the range-consistency term
+// Separate the registration map (ikd-tree) from the output map.  Filtering the
+// ikd-tree aggressively removes registration support and increases drift, so
+// with this flag the ikd-tree keeps the light rank-percentile filter
+// (rank_weight.map_filter_percent) and only the published output map
+// (/cloud_weather_filtered) uses the adaptive high-confidence selection tau_k.
+bool   wr_separate_output_map = false;
+double wr_ref_clutter_down = 0.2;         // clear-weather low-consistency share
+vector<float> point_consistency;          // per downsampled point
+bool   wr_conf_frozen = false;
+
 double rank_mean_last = 0.0;
 float rank_map_threshold_last = 0.0f;
 int rank_valid_num_last = 0;
@@ -1254,6 +1286,58 @@ void print_rank_terminal_distribution(const PointCloudXYZI::Ptr &cloud,
     RCLCPP_INFO(rclcpp::get_logger("laser_mapping"), "%s", oss.str().c_str());
 }
 
+// Recover the range-consistency term (mean Gaussian similarity in [0,1]) from
+// R_k,i = (1 + consistency) * range_factor, and compute the frame-level
+// reliability signals used by c_k.  Works for both the CPU and GPU rank paths.
+void wr_compute_frame_signals(const PointCloudXYZI::Ptr &cloud,
+                              const std::vector<float> &raw_ranks,
+                              const std::vector<bool> &raw_valid,
+                              std::vector<float> &raw_consistency)
+{
+    const int raw_size = std::min({cloud ? static_cast<int>(cloud->points.size()) : 0,
+                                   static_cast<int>(raw_ranks.size()),
+                                   static_cast<int>(raw_valid.size())});
+    raw_consistency.assign(raw_size, 1.0f);
+    const double max_range = std::max(1.0f, DET_RANGE);
+    double sum_rank = 0.0;
+    int valid = 0, structural = 0, clutter = 0;
+    for (int i = 0; i < raw_size; ++i)
+    {
+        if (!raw_valid[i] || !std::isfinite(raw_ranks[i]))
+            continue;
+        const PointType &p = cloud->points[i];
+        const double nr = std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z) / max_range;
+        double range_factor = 1.0;
+        if (rank_range_factor_mode_id == 0)
+            range_factor = 1.0 + nr;
+        else if (rank_range_factor_mode_id == 2)
+            range_factor = 1.0 / (1.0 + nr);
+        const double consistency = clamp_value(raw_ranks[i] / range_factor - 1.0, 0.0, 1.0);
+        raw_consistency[i] = static_cast<float>(consistency);
+        sum_rank += raw_ranks[i];
+        ++valid;
+        if (consistency >= wr_consistency_threshold)
+            ++structural;
+        else
+            ++clutter;
+    }
+    wr_mean_rank_last = valid > 0 ? sum_rank / valid : 0.0;
+    wr_struct_points_last = static_cast<double>(structural);
+    wr_clutter_ratio_last = valid > 0 ? static_cast<double>(clutter) / valid : 0.0;
+    if (valid == 0)
+        return;
+
+    // running references: jump up to a new maximum, decay slowly otherwise
+    auto update_ref = [](double &ref, double x) {
+        if (ref <= 0.0 || x > ref)
+            ref = x;
+        else
+            ref += wr_ref_decay * (x - ref);
+    };
+    update_ref(wr_ref_rank_run, wr_mean_rank_last);
+    update_ref(wr_ref_struct_run, wr_struct_points_last);
+}
+
 void compute_weight_from_downsampled_rank()
 {
     point_weights.assign(feats_down_size, static_cast<float>(rank_min_weight));
@@ -1299,6 +1383,9 @@ void rank_aware_downsample(
     latest_raw_point_rank_valid.clear();
     frame_rank_weight = 1.0;
     rank_map_threshold_last = 0.0f;
+    map_filter_percent_frame = rank_map_filter_percent;
+    wr_clutter_down_last = 0.0;
+    point_consistency.clear();
 
     if (!rank_weight_enable)
     {
@@ -1323,6 +1410,9 @@ void rank_aware_downsample(
     publish_cylindrical_range_image(pubRangeImage, feats_undistort, raw_ranks, raw_valid);
     publish_cylindrical_range_cloud(pubRangeCloud, feats_undistort, raw_ranks, raw_valid);
     print_rank_terminal_distribution(feats_undistort, raw_ranks, raw_valid);
+    std::vector<float> raw_consistency;
+    if (wr_enable)
+        wr_compute_frame_signals(feats_undistort, raw_ranks, raw_valid, raw_consistency);
 
     const int raw_size = feats_undistort ? static_cast<int>(feats_undistort->points.size()) : 0;
     if (raw_size <= 0 || rank_valid_num_last == 0)
@@ -1363,18 +1453,48 @@ void rank_aware_downsample(
     point_ranks.reserve(selected_indices.size());
     point_rank_valid.reserve(selected_indices.size());
 
+    int clutter_down = 0;
     for (const int idx : selected_indices)
     {
         feats_down_body->push_back(feats_undistort->points[idx]);
         point_ranks.push_back(raw_ranks[idx]);
         point_rank_valid.push_back(raw_valid[idx]);
+        const float cons = idx < static_cast<int>(raw_consistency.size()) ?
+                           raw_consistency[idx] : 1.0f;
+        point_consistency.push_back(cons);
+        if (cons < wr_consistency_threshold)
+            ++clutter_down;
     }
 
     feats_down_size = feats_down_body->points.size();
+    if (wr_enable && feats_down_size > 0)
+    {
+        // share of low-consistency points that reach the map stage; p_k grows
+        // with it so tau_k removes (roughly) that share of the frame
+        wr_clutter_down_last = static_cast<double>(clutter_down) / feats_down_size;
+        if (wr_adaptive_map_percent)
+            map_filter_percent_frame = clamp_value(
+                wr_map_percent_min + wr_map_percent_gain * 100.0 *
+                    std::max(0.0, wr_clutter_down_last - wr_ref_clutter_down),
+                wr_map_percent_min, wr_map_percent_max);
+    }
     compute_weight_from_downsampled_rank();
 }
 
-float rank_map_threshold(double percent_override = -1.0)
+// Score used by the map-update selection P_k^map = {p | score >= tau_k}.
+// The range factor of R_k,i favours far points, so a percentile on R_k,i
+// removes the near ground first (vertical drift).  With wr_map_on_consistency
+// the percentile is taken on the range-consistency term instead.
+inline float map_score(size_t i, bool for_output = false)
+{
+    if (wr_enable && wr_separate_output_map && !for_output)
+        return i < point_ranks.size() ? point_ranks[i] : 0.0f;
+    if (wr_enable && wr_map_on_consistency && i < point_consistency.size())
+        return point_consistency[i];
+    return i < point_ranks.size() ? point_ranks[i] : 0.0f;
+}
+
+float rank_map_threshold(double percent_override = -1.0, bool for_output = false)
 {
     if (!rank_weight_enable || !rank_map_filter_enable || rank_valid_num_last <= 0 ||
         point_ranks.empty() || rank_map_filter_percent <= 0.0)
@@ -1385,14 +1505,15 @@ float rank_map_threshold(double percent_override = -1.0)
     for (size_t i = 0; i < point_ranks.size(); ++i)
     {
         if (i < point_rank_valid.size() && point_rank_valid[i] && std::isfinite(point_ranks[i]))
-            sorted.push_back(point_ranks[i]);
+            sorted.push_back(map_score(i, for_output));
     }
 
     if (sorted.empty())
         return -std::numeric_limits<float>::infinity();
 
-    const double requested_percent = percent_override >= 0.0 ?
-                                     percent_override : rank_map_filter_percent;
+    const bool tree_light = wr_enable && wr_separate_output_map && !for_output;
+    const double requested_percent = percent_override >= 0.0 ? percent_override :
+                                     (tree_light ? rank_map_filter_percent : map_filter_percent_frame);
     const double percent = clamp_value(requested_percent, 0.0, 90.0);
     const size_t nth = std::min(sorted.size() - 1,
                                 static_cast<size_t>(std::floor((percent / 100.0) *
@@ -1418,16 +1539,18 @@ void map_incremental()
     const bool low_support = map_confidence_fail_safe_enable &&
                              (effct_feat_num < map_min_effective_points ||
                               rank_valid_ratio_last < map_min_rank_valid_ratio);
+    const double tree_percent = (wr_enable && wr_separate_output_map) ?
+                                rank_map_filter_percent : map_filter_percent_frame;
     const double map_filter_percent = low_support ?
-                                      rank_map_filter_percent * map_threshold_relax_factor :
-                                      rank_map_filter_percent;
+                                      tree_percent * map_threshold_relax_factor :
+                                      tree_percent;
     const float map_rank_thr = rank_map_threshold(map_filter_percent);
     for (int i = 0; i < feats_down_size; i++)
     {
         if (rank_weight_enable && rank_map_filter_enable && rank_valid_num_last > 0)
         {
             const bool rank_valid = i < static_cast<int>(point_rank_valid.size()) && point_rank_valid[i];
-            const float rank = i < static_cast<int>(point_ranks.size()) ? point_ranks[i] : 0.0f;
+            const float rank = map_score(static_cast<size_t>(i));
             if (!rank_valid || rank < map_rank_thr)
                 continue;
         }
@@ -1576,7 +1699,7 @@ void publish_weather_filtered_world(
 
     const float map_rank_thr =
         (rank_weight_enable && rank_map_filter_enable && rank_valid_num_last > 0) ?
-        rank_map_threshold() : -std::numeric_limits<float>::infinity();
+        rank_map_threshold(-1.0, true) : -std::numeric_limits<float>::infinity();
 
     PointCloudXYZI::Ptr filtered_world(new PointCloudXYZI());
     filtered_world->reserve(feats_down_body->points.size());
@@ -1589,7 +1712,7 @@ void publish_weather_filtered_world(
         if (rank_weight_enable && rank_map_filter_enable && rank_valid_num_last > 0)
         {
             const bool rank_valid = i < static_cast<int>(point_rank_valid.size()) && point_rank_valid[i];
-            const float rank = i < static_cast<int>(point_ranks.size()) ? point_ranks[i] : 0.0f;
+            const float rank = map_score(static_cast<size_t>(i), true);
             if (!rank_valid || rank < map_rank_thr)
                 continue;
         }
@@ -1826,6 +1949,10 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     }
 
     res_mean_last = total_residual / effct_feat_num;
+    // With weather_reliability.freeze_confidence, c_k, D_k and R_k^lidar are
+    // fixed at the first IEKF iteration of a scan so the measurement model
+    // stays consistent across iterations.
+    if (!(wr_enable && wr_freeze_confidence && wr_conf_frozen))
     {
         // c_k is a frame-level LiDAR confidence. It is computed independently
         // from whether frame weighting or adaptive covariance is enabled so
@@ -1866,6 +1993,22 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
                                              rank_frame_alpha_count * q_count +
                                              rank_frame_alpha_residual * q_residual) / alpha_sum,
                                             0.0, 1.0);
+        if (wr_enable && rank_signal_available)
+        {
+            const double ref_rank = std::max(wr_ref_mean_rank, wr_ref_rank_run);
+            const double ref_struct = std::max({1.0, wr_ref_struct_points, wr_ref_struct_run});
+            const double r_tilde = clamp_value((wr_mean_rank_last - 1.0) /
+                                               std::max(1e-6, ref_rank - 1.0), 0.0, 1.0);
+            const double q_n = clamp_value(wr_struct_points_last / ref_struct, 0.0, 1.0);
+            const double sigma_e0 = std::max(1e-6, wr_ref_residual_sigma);
+            const double q_e = std::exp(-residual_variance_last / (sigma_e0 * sigma_e0));
+            const double a_sum = std::max(1e-6, wr_alpha_rank + wr_alpha_count + wr_alpha_residual);
+            lidar_confidence_last = clamp_value((wr_alpha_rank * r_tilde +
+                                                 wr_alpha_count * q_n +
+                                                 wr_alpha_residual * q_e) / a_sum,
+                                                0.0, 1.0);
+            wr_conf_frozen = true;
+        }
         lidar_degradation_last = 1.0 - lidar_confidence_last;
         frame_rank_weight = rank_frame_confidence_enable ?
                             1.0 / (1.0 + rank_frame_gamma * lidar_degradation_last) : 1.0;
@@ -2088,6 +2231,23 @@ public:
         this->declare_parameter<double>("adaptive_lidar_cov.degradation_gamma", 4.0);
         this->declare_parameter<double>("adaptive_lidar_cov.min_cov", LASER_POINT_COV);
         this->declare_parameter<double>("adaptive_lidar_cov.max_cov", 0.1);
+        this->declare_parameter<bool>("weather_reliability.enable", false);
+        this->declare_parameter<bool>("weather_reliability.freeze_confidence", true);
+        this->declare_parameter<bool>("weather_reliability.adaptive_map_percent", true);
+        this->declare_parameter<double>("weather_reliability.consistency_threshold", 0.3);
+        this->declare_parameter<double>("weather_reliability.ref_mean_rank", 2.0);
+        this->declare_parameter<double>("weather_reliability.ref_struct_points", 20000.0);
+        this->declare_parameter<double>("weather_reliability.ref_residual_sigma", 0.1);
+        this->declare_parameter<double>("weather_reliability.ref_decay", 0.002);
+        this->declare_parameter<double>("weather_reliability.alpha_rank", 0.4);
+        this->declare_parameter<double>("weather_reliability.alpha_count", 0.4);
+        this->declare_parameter<double>("weather_reliability.alpha_residual", 0.2);
+        this->declare_parameter<double>("weather_reliability.map_percent_min", 5.0);
+        this->declare_parameter<double>("weather_reliability.map_percent_max", 60.0);
+        this->declare_parameter<double>("weather_reliability.map_percent_gain", 1.0);
+        this->declare_parameter<bool>("weather_reliability.map_on_consistency", true);
+        this->declare_parameter<double>("weather_reliability.ref_clutter_down", 0.2);
+        this->declare_parameter<bool>("weather_reliability.separate_output_map", false);
         this->declare_parameter<bool>("map_confidence_fail_safe.enable", true);
         this->declare_parameter<int>("map_confidence_fail_safe.min_effective_points", 100);
         this->declare_parameter<int>("map_confidence_fail_safe.skip_below_effective_points", 20);
@@ -2193,6 +2353,23 @@ public:
         this->get_parameter_or<double>("adaptive_lidar_cov.degradation_gamma", adaptive_cov_degradation_gamma, 4.0);
         this->get_parameter_or<double>("adaptive_lidar_cov.min_cov", adaptive_cov_min, LASER_POINT_COV);
         this->get_parameter_or<double>("adaptive_lidar_cov.max_cov", adaptive_cov_max, 0.1);
+        this->get_parameter_or<bool>("weather_reliability.enable", wr_enable, false);
+        this->get_parameter_or<bool>("weather_reliability.freeze_confidence", wr_freeze_confidence, true);
+        this->get_parameter_or<bool>("weather_reliability.adaptive_map_percent", wr_adaptive_map_percent, true);
+        this->get_parameter_or<double>("weather_reliability.consistency_threshold", wr_consistency_threshold, 0.3);
+        this->get_parameter_or<double>("weather_reliability.ref_mean_rank", wr_ref_mean_rank, 2.0);
+        this->get_parameter_or<double>("weather_reliability.ref_struct_points", wr_ref_struct_points, 20000.0);
+        this->get_parameter_or<double>("weather_reliability.ref_residual_sigma", wr_ref_residual_sigma, 0.1);
+        this->get_parameter_or<double>("weather_reliability.ref_decay", wr_ref_decay, 0.002);
+        this->get_parameter_or<double>("weather_reliability.alpha_rank", wr_alpha_rank, 0.4);
+        this->get_parameter_or<double>("weather_reliability.alpha_count", wr_alpha_count, 0.4);
+        this->get_parameter_or<double>("weather_reliability.alpha_residual", wr_alpha_residual, 0.2);
+        this->get_parameter_or<double>("weather_reliability.map_percent_min", wr_map_percent_min, 5.0);
+        this->get_parameter_or<double>("weather_reliability.map_percent_max", wr_map_percent_max, 60.0);
+        this->get_parameter_or<double>("weather_reliability.map_percent_gain", wr_map_percent_gain, 1.0);
+        this->get_parameter_or<bool>("weather_reliability.map_on_consistency", wr_map_on_consistency, true);
+        this->get_parameter_or<double>("weather_reliability.ref_clutter_down", wr_ref_clutter_down, 0.2);
+        this->get_parameter_or<bool>("weather_reliability.separate_output_map", wr_separate_output_map, false);
         this->get_parameter_or<bool>("map_confidence_fail_safe.enable", map_confidence_fail_safe_enable, true);
         this->get_parameter_or<int>("map_confidence_fail_safe.min_effective_points", map_min_effective_points, 100);
         this->get_parameter_or<int>("map_confidence_fail_safe.skip_below_effective_points", map_skip_below_effective_points, 20);
@@ -2428,7 +2605,8 @@ public:
                     << "pose_x,pose_y,pose_z,roll,pitch,yaw,iekf_update_time,kdtree_search_time,"
                     << "kdtree_update_time,preprocess_time,rank_compute_time,lidar_gap,imu_samples,"
                     << "lidar_queue_size,imu_queue_size,lidar_received,lidar_processed,gpu_active,"
-                    << "total_processing_time\n";
+                    << "total_processing_time,wr_mean_rank,wr_struct_points,wr_clutter_ratio,"
+                    << "wr_clutter_down,map_filter_percent\n";
             }
             else
                 RCLCPP_WARN(this->get_logger(), "Unable to open experiment log: %s", experiment_log_path.c_str());
@@ -2560,7 +2738,10 @@ private:
                            << rank_compute_time_last << ',' << lidar_gap_last << ',' << imu_samples_last << ','
                            << lidar_queue_size_last << ',' << imu_queue_size_last << ','
                            << lidar_received_count.load() << ',' << lidar_processed_count.load() << ','
-                           << (rank_gpu_active ? 1 : 0) << ',' << total_processing_time << '\n';
+                           << (rank_gpu_active ? 1 : 0) << ',' << total_processing_time << ','
+                           << wr_mean_rank_last << ',' << wr_struct_points_last << ','
+                           << wr_clutter_ratio_last << ',' << wr_clutter_down_last << ','
+                           << map_filter_percent_frame << '\n';
         frame_metrics_log_.flush();
     }
 
@@ -2657,7 +2838,7 @@ private:
                         for (int i = 0; i < feats_down_size; ++i)
                         {
                             const bool rank_valid = i < static_cast<int>(point_rank_valid.size()) && point_rank_valid[i];
-                            const float rank = i < static_cast<int>(point_ranks.size()) ? point_ranks[i] : 0.0f;
+                            const float rank = map_score(static_cast<size_t>(i));
                             if (!rank_valid || rank < map_rank_thr)
                                 continue;
                             init_points.push_back(feats_down_world->points[i]);
@@ -2710,6 +2891,7 @@ private:
             /*** iterated state estimation ***/
             double t_update_start = omp_get_wtime();
             double solve_H_time = 0;
+            wr_conf_frozen = false;
             adaptive_lidar_cov = adaptive_lidar_cov_enable ? adaptive_lidar_cov : base_lidar_cov;
             kf.update_iterated_dyn_share_modified(adaptive_lidar_cov, solve_H_time);
             state_point = kf.get_x();

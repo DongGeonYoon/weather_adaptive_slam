@@ -85,3 +85,27 @@ python3 src/FAST_LIO/tools/evaluate_weather_adaptive.py \
   --plot src/FAST_LIO/Log/map_comparison.png \
   --output src/FAST_LIO/Log/weather_adaptive_evaluation.json
 ```
+
+## Weather reliability extension (`weather_reliability.*`)
+
+All parameters default to off, which reproduces the behaviour above. The final simulation
+configuration is `config/sim_weather_weather_adaptive.yaml`; results and discussion are in
+the repository README.
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `enable` | false | Turn the extension on. |
+| `freeze_confidence` | true | Compute `c_k` (and thus `D_k`, `R_k^LiDAR`) once per scan, at the first IEKF iteration. |
+| `alpha_rank`, `alpha_count`, `alpha_residual` | 0.4, 0.4, 0.2 | `c_k = (a_R R~ + a_N q_N + a_E q_E) / sum(a)`. |
+| `ref_mean_rank` | 2.0 | Clear-weather mean `R_k,i`; `R~ = (mean R - 1) / (R_ref - 1)`. |
+| `ref_struct_points` | 20000 | Clear-weather count of points with consistency >= threshold; `q_N = N / N_ref`. |
+| `ref_residual_sigma` | 0.1 | `q_E = exp(-var / sigma0^2)`. |
+| `ref_decay` | 0.002 | References follow a running maximum that decays at this rate. |
+| `consistency_threshold` | 0.3 | Consistency (range-similarity term of `R_k,i`) separating structure from clutter. |
+| `map_on_consistency` | true | Map filter scores points by consistency instead of `R_k,i` (the range factor would remove near ground first). |
+| `adaptive_map_percent` | true | Map filter percentile `p_k = clamp(min + gain * 100 * max(0, clutter_share - ref_clutter_down), min, max)`. |
+| `map_percent_min`, `map_percent_max`, `map_percent_gain`, `ref_clutter_down` | 5, 60, 1.0, 0.2 | Bounds and slope of `p_k`. |
+| `separate_output_map` | false | ikd-tree keeps the light `rank_weight.map_filter_percent` filter on `R_k,i`; only the published output map (`/cloud_weather_filtered`) uses the adaptive `tau_k`. |
+
+The per-frame CSV gains `wr_mean_rank, wr_struct_points, wr_clutter_ratio, wr_clutter_down,
+map_filter_percent`.
