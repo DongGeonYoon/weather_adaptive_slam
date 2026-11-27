@@ -20,7 +20,9 @@
 
 ## 1. 방법: 처리 흐름
 
-![Weather-Adaptive FAST-LIO2 처리 흐름](docs/figures/pipeline.png)
+<p align="center">
+  <img src="docs/figures/pipeline.png" alt="Weather-Adaptive FAST-LIO2 처리 흐름" width="640">
+</p>
 
 ---
 
@@ -29,47 +31,32 @@
 ```
 .
 ├── README.md
-├── docs/figures/                           README 그림 (처리 흐름, 비교 영상 프레임, 결과 요약)
-└── weather_adaptive_fastlio/               ROS 2 Humble 작업공간
-    ├── LOCAL_SETUP.md                      Docker 없이 로컬에서 설치·빌드하는 방법
-    ├── scripts/
-    │   ├── setup_local_humble.sh           의존성 설치 (ROS 2, PCL, Eigen, Livox-SDK2 등)
-    │   └── build_local_humble.sh           colcon 빌드
-    ├── config/boreas_rosbag_qos.yaml       Boreas rosbag 재생 QoS 설정
-    ├── validation/run_boreas_short.sh      Boreas 짧은 구간 실행
-    ├── results/odom_bag_to_tum.py          /Odometry bag → TUM 궤적 변환
-    ├── src/FAST_LIO/                       FAST-LIO2 + weather-adaptive 확장 (ROS 2 패키지)
+├── docs/figures/                    README 그림
+└── weather_adaptive_fastlio/
+    ├── src/FAST_LIO/                FAST-LIO2 + weather-adaptive 확장 (ROS 2 패키지)
     │   ├── src/
-    │   │   ├── laserMapping.cpp            메인 노드: IEKF, 점 신뢰도 가중치, c_k / D_k,
-    │   │   │                               적응 공분산, 지도 필터 τ_k, weather_reliability 확장
-    │   │   ├── rank_cuda.cu                Fast Point Ranking CUDA 커널
-    │   │   ├── preprocess.cpp / .h         LiDAR 전처리 (ring, time 필드 처리)
-    │   │   └── IMU_Processing.hpp          IMU 전파, 모션 보정
-    │   ├── include/                        ikd-Tree, IKFoM(IEKF), rank_cuda.h 등 헤더
-    │   ├── config/
-    │   │   ├── sim_weather_baseline.yaml                   시뮬레이션 · baseline
-    │   │   ├── sim_weather_weather_adaptive_original.yaml  시뮬레이션 · 기존 adaptive
-    │   │   ├── sim_weather_weather_adaptive.yaml           시뮬레이션 · 제안 방법 (최종)
-    │   │   ├── boreas_rt_baseline.yaml                     Boreas · baseline
-    │   │   ├── boreas_rt_weather_adaptive.yaml             Boreas · adaptive (제안 방법 설정 미적용)
-    │   │   └── boreas*.yaml, velodyne*.yaml                원본 FAST-LIO 센서 설정
-    │   ├── launch/mapping_boreas.launch.py, mapping_velodyne.launch.py
-    │   ├── rviz_cfg/                       RViz 설정
-    │   ├── msg/Pose6D.msg
-    │   ├── tools/evaluate_weather_adaptive.py   Boreas 결과 평가 (ATE, RTE, 맵 노이즈)
+    │   │   ├── laserMapping.cpp     메인 노드: IEKF, 점 신뢰도 가중치, c_k / D_k, 적응 공분산, 지도 필터
+    │   │   ├── rank_cuda.cu         Fast Point Ranking CUDA 커널
+    │   │   ├── preprocess.cpp/.h    LiDAR 전처리
+    │   │   └── IMU_Processing.hpp   IMU 전파, 모션 보정
+    │   ├── include/                 ikd-Tree, IKFoM(IEKF) 등 헤더
+    │   ├── config/                  baseline / weather-adaptive 파라미터 (sim_weather_*, boreas_rt_* 등)
+    │   ├── launch/, rviz_cfg/, msg/
+    │   ├── tools/evaluate_weather_adaptive.py   궤적·지도 평가
     │   └── doc/WEATHER_ADAPTIVE_FAST_LIO2.md    파라미터 설명
-    └── sim/                                악천후 시뮬레이션 벤치마크 (사용법: sim/README.md)
-        ├── sim_world.py                    장면, 궤적, LiDAR(32채널)·IMU 생성
-        ├── weather_models.py               안개, 비, 눈, 복합 날씨 모델
-        ├── generate_dataset.py             날씨별 rosbag2와 GT 생성
-        ├── run_experiments.sh              방법별 실행 (baseline / original / proposed / proposed_cov)
-        ├── evaluate_sim.py                 ATE, RPE, 드리프트, 맵 노이즈, voxel IoU
-        ├── compare_results.py              데이터셋·반복 합산 비교표
-        ├── render_presentation.py          발표용 3D 지도 비교 영상
-        └── make_highlight.sh               약 1분 40초 하이라이트판
+    ├── sim/                         악천후 시뮬레이션 벤치마크 코드
+    │   ├── sim_world.py             장면, 궤적, LiDAR·IMU 생성
+    │   ├── weather_models.py        안개, 비, 눈, 복합 날씨 모델
+    │   ├── generate_dataset.py      시뮬레이션 데이터 생성
+    │   ├── run_experiments.sh       방법별 실행
+    │   ├── evaluate_sim.py          ATE, RPE, 드리프트, 맵 노이즈, voxel IoU
+    │   ├── compare_results.py       결과 비교표
+    │   ├── render_presentation.py   3D 지도 비교 영상
+    │   └── make_highlight.sh        하이라이트 영상 편집
+    ├── scripts/                     로컬 설치·빌드 스크립트
+    ├── config/, validation/, results/   rosbag QoS 설정, 실행·궤적 변환 유틸리티
+    └── LOCAL_SETUP.md               로컬 설치 방법
 ```
-
-실험 산출물(데이터셋 bag, 실행 기록, 영상)은 `weather_adaptive_fastlio/sim_results/`에 생성되며 저장소에는 포함되지 않습니다.
 
 ---
 
